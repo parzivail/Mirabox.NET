@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Drawing.Text;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -12,6 +13,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Timers;
+using Encoder = System.Drawing.Imaging.Encoder;
 using Timer = System.Timers.Timer;
 
 namespace Mirabox.NET
@@ -48,7 +50,9 @@ namespace Mirabox.NET
 
 		private static readonly byte[] HeartbeatQuery =
 		{
-			0x54, 0x46, 0x36, 0x7a, 0x63, 0x01, 0x00, 0x00, 0x28, 0x00, 0x00, 0x03, 0x03, 0x03
+			0x54, 0x46, 0x36, 0x7a, 0x63, 0x01, 0x00, 0x00, 0x28, 0x00, 0x00, 0x03, 0x03, 0x03, 0x00, 0x24,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x07, 0x80, 0x04, 0x38,
+			0x02, 0x57, 0x07, 0x80, 0x04, 0x38, 0x00, 0x78, 0x00, 0x07, 0x36, 0xE7, 0x00, 0x01, 0x00, 0x00
 		};
 
 		private readonly string _host;
@@ -56,7 +60,6 @@ namespace Mirabox.NET
 		private readonly List<IPEndPoint> _heartbeatEndPoints = new();
 
 		private short _frameNumber;
-		private short _numFramesSinceHeartbeat;
 
 		private UdpState _stateControlPort;
 		private UdpState _stateVideoPort;
@@ -86,19 +89,21 @@ namespace Mirabox.NET
 			using var chunkStream = new MemoryStream();
 			var chunkWriter = new BinaryWriter(chunkStream);
 			
-			using var frameStream = File.Open(@"R:\Temp\highground.jpg", FileMode.Open);
+			using var frameStream = new MemoryStream();
 
-			// using var bmp = new Bitmap(1920, 1080);
-			// using var g = Graphics.FromImage(bmp);
-			//
-			// g.Clear(Color.White);
-			// g.DrawLine(Pens.Black, 10, 10, 710, 470);
-			//
-			// bmp.Save(frameStream, ImageFormat.Jpeg);
+			using var bmp = new Bitmap(1920, 1080);
+			using var g = Graphics.FromImage(bmp);
+			g.TextRenderingHint = TextRenderingHint.AntiAlias;
+
+			var jpgEncoder = ImageCodecInfo.GetImageEncoders().First(info => info.FormatID == ImageFormat.Jpeg.Guid);
+
+			using var encoderParameters = new EncoderParameters(1);
+			using var encoderParameter = new EncoderParameter(Encoder.Quality, 40L);
+			encoderParameters.Param[0] = encoderParameter;
 
 			while (true)
 			{
-				if (_heartbeatEndPoints.Count == 0 || _numFramesSinceHeartbeat >= 30)
+				if (_heartbeatEndPoints.Count == 0)
 					continue;
 
 				controlStream.SetLength(0);
@@ -109,7 +114,13 @@ namespace Mirabox.NET
 
 				var controlBytes = controlStream.ToArray();
 				_stateControlPort.UdpClient.Send(controlBytes, controlBytes.Length, ControlBroadcastEndpoint);
+			
+				frameStream.Seek(0, SeekOrigin.Begin);
+				{
+					g.Clear(Color.FromArgb(0x0D0B0C));
 
+					bmp.Save(frameStream, jpgEncoder, encoderParameters);
+				}
 				frameStream.Seek(0, SeekOrigin.Begin);
 
 				var frameChunkBytes = new byte[1020];
@@ -137,7 +148,6 @@ namespace Mirabox.NET
 
 				_frameNumber++;
 				_frameNumber %= short.MaxValue;
-				_numFramesSinceHeartbeat++;
 			}
 		}
 
@@ -156,7 +166,18 @@ namespace Mirabox.NET
 			}
 
 			_heartbeatEndPoints.Clear();
-			_numFramesSinceHeartbeat = 0;
+
+			var width = 1920;
+			var height = 1080;
+			HeartbeatQuery[28] = (byte) ((width & 0xFF00) >> 8);
+			HeartbeatQuery[29] = (byte) (width & 0xFF);
+			HeartbeatQuery[30] = (byte) ((height & 0xFF00) >> 8);
+			HeartbeatQuery[31] = (byte) (height & 0xFF);
+			
+			HeartbeatQuery[34] = (byte) ((width & 0xFF00) >> 8);
+			HeartbeatQuery[35] = (byte) (width & 0xFF);
+			HeartbeatQuery[36] = (byte) ((height & 0xFF00) >> 8);
+			HeartbeatQuery[37] = (byte) (height & 0xFF);
 			_stateHeartbeatPort.UdpClient.Send(HeartbeatQuery, HeartbeatQuery.Length, HeartbeatBroadcastEndpoint);
 		}
 

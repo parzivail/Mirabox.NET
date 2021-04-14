@@ -50,7 +50,7 @@ namespace Mirabox.NET
 		{
 			if (ar.AsyncState is not UdpState state)
 				return;
-			
+
 			var client = state.UdpClient;
 			IPEndPoint clientEndpoint = null;
 
@@ -81,7 +81,7 @@ namespace Mirabox.NET
 			if (lastChunk)
 			{
 				_frameStream.Seek(0, SeekOrigin.Begin);
-				
+
 				if (_synced)
 				{
 					var bmp = new Bitmap(_frameStream);
@@ -99,7 +99,7 @@ namespace Mirabox.NET
 		{
 			if (ar.AsyncState is not UdpState state)
 				return;
-			
+
 			var client = state.UdpClient;
 			IPEndPoint clientEndpoint = null;
 
