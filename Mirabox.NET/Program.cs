@@ -1,143 +1,178 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Timers;
+using Timer = System.Timers.Timer;
 
 namespace Mirabox.NET
 {
-	internal class UdpState : IDisposable
+	class Program
 	{
-		public UdpClient UdpClient { get; }
-		public IPEndPoint ListenEndPoint { get; }
-
-		public UdpState(UdpClient udpClient, IPEndPoint listenEndPoint)
+		static void Main(string[] args)
 		{
-			UdpClient = udpClient;
-			ListenEndPoint = listenEndPoint;
-		}
-
-		/// <inheritdoc />
-		public void Dispose()
-		{
-			UdpClient?.Dispose();
+			// new MiraboxReciever("192.168.168.12").Start();
+			new MiraboxTransmitter("192.168.168.12").Start();
 		}
 	}
 
-	class Program
+	[StructLayout(LayoutKind.Explicit)]
+	internal struct ShortConverter
 	{
-		private static readonly MemoryStream JpegMemStream = new();
-		
-		private static ViewerWindow _window;
-		private static bool _synced;
-		
-		private static int _currentFrame = -1;
-		private static int _lastChunk = -1;
-		
-		private static UdpState OpenPort(int port)
+		private static ShortConverter Instance;
+
+		[FieldOffset(0)] short ShortValue;
+		[FieldOffset(0)] ushort UShortValue;
+
+		public static short Convert(ushort source)
 		{
-			var endPoint = new IPEndPoint(IPAddress.Parse("192.168.168.12"), port);
-			var udpClient = new UdpClient();
-			udpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+			Instance.UShortValue = source;
+			return Instance.ShortValue;
+		}
+	}
 
-			udpClient.EnableBroadcast = true;
-			udpClient.ExclusiveAddressUse = false;
+	class MiraboxTransmitter
+	{
+		private static readonly IPEndPoint HeartbeatBroadcastEndpoint = new(IPAddress.Broadcast, 48689);
+		private static readonly IPEndPoint VideoBroadcastEndpoint = new(IPAddress.Parse("226.2.2.2"), 2068);
+		private static readonly IPEndPoint ControlBroadcastEndpoint = new(IPAddress.Parse("226.2.2.2"), 2067);
 
-			udpClient.Client.Bind(endPoint);
-			udpClient.JoinMulticastGroup(IPAddress.Parse("226.2.2.2"), endPoint.Address);
+		private static readonly byte[] HeartbeatQuery =
+		{
+			0x54, 0x46, 0x36, 0x7a, 0x63, 0x01, 0x00, 0x00, 0x28, 0x00, 0x00, 0x03, 0x03, 0x03
+		};
 
-			return new UdpState(udpClient, endPoint);
+		private readonly string _host;
+		private readonly Timer _heartbeatTimer = new(1000);
+		private readonly List<IPEndPoint> _heartbeatEndPoints = new();
+
+		private short _frameNumber;
+		private short _numFramesSinceHeartbeat;
+
+		private UdpState _stateControlPort;
+		private UdpState _stateVideoPort;
+		private UdpState _stateHeartbeatPort;
+
+		public MiraboxTransmitter(string host)
+		{
+			_host = host;
+
+			_heartbeatTimer.Elapsed += HeartbeatTick;
+			_heartbeatTimer.AutoReset = true;
 		}
 
-		static void Main(string[] args)
+		public void Start()
 		{
-			// using var stateAudioStream = OpenPort(2066);
-			// stateAudioStream.UdpClient.BeginReceive(UdpPacketRecieved, stateAudioStream);
+			_stateControlPort = UdpHelper.OpenPort(_host, 2067);
+			_stateVideoPort = UdpHelper.OpenPort(_host, 2068);
+
+			_stateHeartbeatPort = UdpHelper.OpenPort(_host, 48689);
+			_stateHeartbeatPort.UdpClient.BeginReceive(HeartbeatPacketRecieved, _stateHeartbeatPort);
+
+			_heartbeatTimer.Enabled = true;
+
+			using var controlStream = new MemoryStream();
+			var controlWriter = new BinaryWriter(controlStream);
+			
+			using var chunkStream = new MemoryStream();
+			var chunkWriter = new BinaryWriter(chunkStream);
+			
+			using var frameStream = File.Open(@"R:\Temp\highground.jpg", FileMode.Open);
+
+			// using var bmp = new Bitmap(1920, 1080);
+			// using var g = Graphics.FromImage(bmp);
 			//
-			// using var stateControlStream = OpenPort(2067);
-			// stateControlStream.UdpClient.BeginReceive(UdpPacketRecieved, stateControlStream);
+			// g.Clear(Color.White);
+			// g.DrawLine(Pens.Black, 10, 10, 710, 470);
+			//
+			// bmp.Save(frameStream, ImageFormat.Jpeg);
 
-			_window = new ViewerWindow();
-			
-			using var stateVideoPort = OpenPort(2068);
-			stateVideoPort.UdpClient.BeginReceive(VideoPacketRecieved, stateVideoPort);
-
-			using var stateHeartbeatPort = OpenPort(48689);
-			stateHeartbeatPort.UdpClient.BeginReceive(HeartbeatPacketRecieved, stateHeartbeatPort);
-
-			_window.Run();
-		}
-
-		private static void VideoPacketRecieved(IAsyncResult ar)
-		{
-			var state = (UdpState) ar.AsyncState;
-			var client = state.UdpClient;
-			IPEndPoint clientEndpoint = null;
-
-			var data = client.EndReceive(ar, ref clientEndpoint);
-			
-			using var br = new BinaryReader(new MemoryStream(data));
-
-			var frameNum = IPAddress.NetworkToHostOrder(br.ReadInt16());
-			var chunkData = IPAddress.NetworkToHostOrder(br.ReadInt16());
-
-			var lastChunk = (chunkData & 0b1000000000000000) != 0;
-			var chunkNum = chunkData & 0b0111111111111111;
-
-			if (chunkNum == 0)
-				_currentFrame = frameNum;
-			else if (frameNum != _currentFrame || chunkNum != _lastChunk + 1)
-				_synced = false;
-			
-			_currentFrame = frameNum;
-			_lastChunk = chunkNum;
-
-			if (_synced)
+			while (true)
 			{
-				var payload = br.ReadBytes(1020);
-				JpegMemStream.Write(payload, 0, payload.Length);				
-			}
+				if (_heartbeatEndPoints.Count == 0 || _numFramesSinceHeartbeat >= 30)
+					continue;
 
-			if (lastChunk)
-			{
-				if (_synced)
+				controlStream.SetLength(0);
+
+				controlWriter.Write(new byte[4]);
+				controlWriter.Write(IPAddress.HostToNetworkOrder(_frameNumber));
+				controlWriter.Write(new byte[14]);
+
+				var controlBytes = controlStream.ToArray();
+				_stateControlPort.UdpClient.Send(controlBytes, controlBytes.Length, ControlBroadcastEndpoint);
+
+				frameStream.Seek(0, SeekOrigin.Begin);
+
+				var frameChunkBytes = new byte[1020];
+				var numChunks = (frameStream.Length + frameChunkBytes.Length - 1) / frameChunkBytes.Length;
+				for (short chunkNum = 0; chunkNum < numChunks; chunkNum++)
 				{
-					JpegMemStream.Seek(0, SeekOrigin.Begin);
+					chunkStream.SetLength(0);
 
-					var bmp = new Bitmap(JpegMemStream);
-					_window.EnqueueFrame(bmp);
+					var chunkData = (ushort) (chunkNum & 0b0111111111111111);
+					if (chunkNum == numChunks - 1)
+						chunkData |= 0b1000000000000000;
+
+					chunkWriter.Write(IPAddress.HostToNetworkOrder(_frameNumber));
+					chunkWriter.Write(IPAddress.HostToNetworkOrder(ShortConverter.Convert(chunkData)));
+
+					for (var i = 0; i < frameChunkBytes.Length; i++)
+						frameChunkBytes[i] = 0;
 					
-					JpegMemStream.SetLength(0);
-				}
-				
-				_synced = true;
-			}
+					frameStream.Read(frameChunkBytes, 0, frameChunkBytes.Length);
+					chunkWriter.Write(frameChunkBytes);
 
-			client.BeginReceive(VideoPacketRecieved, state);
+					var chunkBytes = chunkStream.ToArray();
+					_stateVideoPort.UdpClient.Send(chunkBytes, chunkBytes.Length, VideoBroadcastEndpoint);
+				}
+
+				_frameNumber++;
+				_frameNumber %= short.MaxValue;
+				_numFramesSinceHeartbeat++;
+			}
 		}
 
-		private static void HeartbeatPacketRecieved(IAsyncResult ar)
+		private void HeartbeatTick(object sender, ElapsedEventArgs e)
 		{
-			var state = (UdpState) ar.AsyncState;
+			var heartbeatPacket = new byte[512];
+			Array.Copy(HeartbeatQuery, heartbeatPacket, HeartbeatQuery.Length);
+
+			if (_heartbeatEndPoints.Count == 0)
+			{
+				Console.WriteLine("No heartbeat");
+			}
+			else
+			{
+				Console.WriteLine($"Heartbeat clients: {_heartbeatEndPoints.Count}");
+			}
+
+			_heartbeatEndPoints.Clear();
+			_numFramesSinceHeartbeat = 0;
+			_stateHeartbeatPort.UdpClient.Send(HeartbeatQuery, HeartbeatQuery.Length, HeartbeatBroadcastEndpoint);
+		}
+
+		private void HeartbeatPacketRecieved(IAsyncResult ar)
+		{
+			if (ar.AsyncState is not UdpState state)
+				return;
+
 			var client = state.UdpClient;
 			IPEndPoint clientEndpoint = null;
 
 			var data = client.EndReceive(ar, ref clientEndpoint);
 
-			if (data.Length == 512 && Encoding.ASCII.GetString(data, 0, 5) == "TF6zc")
+			if (data.Length >= 5 && Encoding.ASCII.GetString(data, 0, 5) == "TF6z`")
 			{
-				var outgoingData = new byte[]
-				{
-					0x54, 0x46, 0x36, 0x7a, 0x60, 0x02, 0x00, 0x00, 0x28, 0x00, 0x00, 0x03, 0x03, 0x01
-				};
-				client.Send(outgoingData, outgoingData.Length, clientEndpoint);
+				_heartbeatEndPoints.Add(clientEndpoint);
 			}
 
 			client.BeginReceive(HeartbeatPacketRecieved, state);

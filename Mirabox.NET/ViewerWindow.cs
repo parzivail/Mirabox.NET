@@ -143,27 +143,30 @@ namespace Mirabox.NET
 
 		private void WindowUpdate(FrameEventArgs e)
 		{
-			if (_imageUploadQueue.TryDequeue(out var bmp))
+			lock (_imageUploadQueue)
 			{
-				_screenTextureSize = new Vector2(bmp.Width, bmp.Height);
+				if (_imageUploadQueue.TryDequeue(out var bmp))
+				{
+					_screenTextureSize = new Vector2(bmp.Width, bmp.Height);
 
-				var scale = Math.Min(Size.X / _screenTextureSize.X, Size.Y / _screenTextureSize.Y);
-				_shaderScreen.Uniforms.SetValue("m", Matrix4.CreateScale(_screenTextureSize.X * scale, _screenTextureSize.Y * scale, 1));
+					var scale = Math.Min(Size.X / _screenTextureSize.X, Size.Y / _screenTextureSize.Y);
+					_shaderScreen.Uniforms.SetValue("m", Matrix4.CreateScale(_screenTextureSize.X * scale, _screenTextureSize.Y * scale, 1));
 
-				GL.BindTexture(TextureTarget.Texture2D, _screenTexture);
+					GL.BindTexture(TextureTarget.Texture2D, _screenTexture);
 
-				var data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height),
-					ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+					var data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height),
+						ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
 
-				GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba, data.Width, data.Height, 0,
-					PixelFormat.Bgra, PixelType.UnsignedByte, data.Scan0);
-				bmp.UnlockBits(data);
+					GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba, data.Width, data.Height, 0,
+						PixelFormat.Bgra, PixelType.UnsignedByte, data.Scan0);
+					bmp.UnlockBits(data);
 
-				bmp.Dispose();
+					bmp.Dispose();
 
-				_frameDrawCounter++;
+					_frameDrawCounter++;
 
-				GL.BindTexture(TextureTarget.Texture2D, 0);
+					GL.BindTexture(TextureTarget.Texture2D, 0);
+				}
 			}
 
 			var now = DateTime.Now;
